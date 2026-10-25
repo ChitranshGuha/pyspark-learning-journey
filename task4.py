@@ -1,0 +1,7 @@
+df = spark.read.format("delta").table("server_logs")
+log_df=df.filter(col("log_level")=="ERROR")
+log_df.cache()
+error_count = log_df.count()
+print(error_count)
+compact_df = log_df.coalesce(2)
+compact_df.write.format("delta").mode("overwrite").saveAsTable("error_log_summary")
