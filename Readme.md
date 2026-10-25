@@ -54,3 +54,70 @@ compact_df = log_df.coalesce(2)
 # 6. Action 2: Write the optimized data to a new Delta table
 compact_df.write.format("delta").mode("overwrite").saveAsTable("error_log_summary")
 ```
+## 🤝 Integration: Triggering Databricks from Airflow
+
+In modern data architecture, Airflow acts as the "Brain" (orchestrator) and Databricks acts as the "Brawn" (compute engine). We never run heavy data processing on the Airflow server itself. Instead, Airflow uses the `DatabricksSubmitRunOperator` to trigger a PySpark notebook via the Databricks REST API.
+
+### The Architecture Flow
+
+```mermaid
+sequenceDiagram
+    participant A as Airflow Worker
+    participant D as Databricks API
+    participant C as Databricks Job Cluster
+    participant S as Cloud Storage (Delta)
+
+    A->>D: 1. Submit Run (REST API + Token)
+    D->>C: 2. Provision Ephemeral Cluster
+    C->>S: 3. Read/Write Data (PySpark)
+    loop Every 30 seconds
+        A->>D: 4. Poll for Status
+        D-->>A: Status: PENDING / RUNNING
+    end
+    C-->>D: 5. Job Complete (Cluster Terminates)
+    D-->>A: Status: SUCCESS
+```
+
+### The Code Implementation
+
+By passing a `new_cluster` configuration, Airflow tells Databricks to spin up a temporary cluster just for this job and immediately terminate it when the notebook finishes, saving massive compute costs.
+
+```python
+from datetime import datetime
+from airflow import DAG
+from airflow.providers.databricks.operators.databricks import DatabricksSubmitRunOperator
+
+default_args = {
+    'owner': 'platform_team',
+    'retries': 1
+}
+
+with DAG(
+    dag_id='databricks_daily_processing',
+    default_args=default_args,
+    start_date=datetime(2026, 10, 24),
+    schedule_interval='@daily',
+    catchup=False
+) as dag:
+
+    # 1. Define the compute specifications (Ephemeral Job Cluster)
+    cluster_config = {
+        'spark_version': '13.3.x-scala2.12',
+        'node_type_id': 'i3.xlarge',
+        'num_workers': 2
+    }
+
+    # 2. Define the notebook path in the Databricks Workspace
+    notebook_task_config = {
+        'notebook_path': '/Users/c.guha@mycompany.com/premium_customers_job',
+    }
+
+    # 3. The Operator that makes the REST API call
+    run_databricks_notebook = DatabricksSubmitRunOperator(
+        task_id='run_pyspark_job',
+        databricks_conn_id='databricks_default', # Authenticates via PAT token stored in Airflow UI
+        new_cluster=cluster_config,
+        notebook_task=notebook_task_config,
+        notebook_params={'execution_date': '{{ ds }}'} # Passing Jinja templates into PySpark!
+    )
+```
